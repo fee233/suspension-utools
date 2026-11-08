@@ -36,7 +36,10 @@
 <script type="application/javascript">
     let lock = false;
     let img = document.querySelector("img")
-    let imgKey = window.location.hash.substring(1);
+    // uTools 8.0 兼容：createBrowserWindow 传入的 '#' 可能被转义为 %23 进入 query，
+    // 故同时兼容 search("?#key" / "?%23key") 与 hash("#key") 两种形态
+    let rawKey = window.location.search || window.location.hash;
+    let imgKey = decodeURIComponent(String(rawKey).replace(/^[?#]+/, ""));
     img.src = localStorage[imgKey];
     let filePath = localStorage[imgKey + "_file"];
     localStorage.removeItem(imgKey);
