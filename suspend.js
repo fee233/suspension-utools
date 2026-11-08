@@ -8,6 +8,30 @@ const { ipcRenderer } = require('electron')
 
 window.isMac = utools.isMacOs();
 
+// 调试日志：便于排查显示问题，可随时删除
+function debugLog(msg) {
+    try {
+        let img = window.document.querySelector("img");
+        fs.appendFileSync('/tmp/suspend-debug.log',
+            `${new Date().toISOString()} href=${window.location.href} ` +
+            `payloadLen=${(window._payload || '').length} naturalWidth=${img ? img.naturalWidth : 'N/A'} :: ${msg}\n`);
+    } catch (e) { /* 忽略日志失败 */ }
+}
+debugLog('suspend.js preload loaded, ready to request img');
+
+// 主动向主界面请求图片数据（主界面 webContents.send 应答）
+utools.sendToParent('img-ready');
+
+ipcRenderer.on('img-data', (event, data) => {
+    let img = window.document.querySelector("img");
+    window._payload = data.payload || '';
+    img.onload = () => debugLog('img onload, naturalWidth=' + img.naturalWidth);
+    img.onerror = (e) => debugLog('img onerror');
+    img.src = data.payload;
+    window._filePath = data.filePath;
+    debugLog('img-data received, payloadLen=' + (data.payload || '').length);
+})
+
 window.toEdit = () => {
     utools.sendToParent('toEdit');
 }

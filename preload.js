@@ -24,6 +24,17 @@ function uuidv4() {
     });
 }
 
+// uTools 8.0 兼容：不再通过 localStorage 向自定义窗口传图，
+// 改用官方推荐的 webContents.send 直传（悬浮窗口加载后主动回执请求，主界面立即应答）
+let imgWin = null;
+let pendingImgData = null;
+
+ipcRenderer.on('img-ready', () => {
+    if (imgWin && pendingImgData) {
+        imgWin.webContents.send('img-data', pendingImgData);
+    }
+});
+
 function show(payload, filePath) {
     let params = {}
     let paramsIndex = payload.lastIndexOf("#");
@@ -46,11 +57,8 @@ function show(payload, filePath) {
             height = Math.min(height, display.size.height * 0.8);
             width = height * scale;
         }
-        let imgKey = uuidv4();
-        //通过localStorage传参,解决url传参的大小限制问题
-        localStorage.setItem(imgKey, payload);
-        localStorage.setItem(imgKey + "_file", filePath);
-        let imgWin = utools.createBrowserWindow('suspend.html?#' + imgKey, {
+        pendingImgData = { payload, filePath };
+        imgWin = utools.createBrowserWindow('suspend.html', {
             title: 'img',
             x: params.x ? parseInt(params.x) : null,
             y: params.y ? parseInt(params.y) : null,
@@ -73,6 +81,14 @@ function show(payload, filePath) {
             }
         }, () => {
             imgWin.setAlwaysOnTop(true, 'screen');
+            // 窗口就绪后主动推送图片数据，附带重试以防监听器尚未注册
+            for (let i = 0; i <= 5; i++) {
+                setTimeout(() => {
+                    if (imgWin && pendingImgData) {
+                        imgWin.webContents.send('img-data', pendingImgData);
+                    }
+                }, i * 200);
+            }
             // uTools 8.0 (Electron 34) 兼容：
             // ipcRenderer.sendTo 已废弃，子窗口 -> 主界面改用 utools.sendToParent，
             // 主界面 -> 子窗口改用 imgWin.webContents.send
