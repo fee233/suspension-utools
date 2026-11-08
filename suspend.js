@@ -1,46 +1,35 @@
 const fs = require('fs');
 const { ipcRenderer } = require('electron')
 
-const mineMap = {
-    "image/bmp" : "bmp",
-    "image/gif" : "gif",
-    "image/heic" : "heic",
-    "image/jpeg" : "jpeg",
-    "image/jpeg" : "jpg",
-    "image/jpeg" : "jpe",
-    "image/png" : "png",
-    "image/svg+xml" : "svg",
-    "image/webp" : "webp",
-    "image/x-icon" : "ico"
-}
+// uTools 8.0 (Electron 34) 兼容：
+// ipcRenderer.sendTo 已废弃移除。
+// 子窗口 -> 插件主界面：utools.sendToParent(channel, ...args)
+// 插件主界面 -> 子窗口：webContents.send()，本文件中用 ipcRenderer.on 接收
 
 window.isMac = utools.isMacOs();
-let winId;
-ipcRenderer.on('init', (event) => {
-    winId = event.senderId;
-});
+
 window.toEdit = () => {
-    ipcRenderer.sendTo(winId, 'toEdit');
+    utools.sendToParent('toEdit');
 }
 window.resize = (changed, proportion) => {
-    ipcRenderer.sendTo(winId, 'resize', changed, proportion);
+    utools.sendToParent('resize', changed, proportion);
 }
 window.moveBounds = (x, y, width, height) => {
-    ipcRenderer.sendTo(winId, 'moveBounds', x, y, width, height);
+    utools.sendToParent('moveBounds', x, y, width, height);
 }
 
 /**
  * 拷贝当前图片，借助窗口截图实现
  */
 window.copyNowImage = () => {
-    ipcRenderer.sendTo(winId, 'copyNowImage');
+    utools.sendToParent('copyNowImage');
 }
 
 /*
  * 保存当前图片，借助窗口截图实现
  */
 window.saveNowImage = () => {
-    ipcRenderer.sendTo(winId, 'saveNowImage');
+    utools.sendToParent('saveNowImage');
 }
 
 ipcRenderer.on('reduction', (event) => {
@@ -48,7 +37,7 @@ ipcRenderer.on('reduction', (event) => {
 })
 
 window.modifyOpacity = (op) => {
-    ipcRenderer.sendTo(winId, 'modifyOpacity',op);
+    utools.sendToParent('modifyOpacity', op);
 }
 
 

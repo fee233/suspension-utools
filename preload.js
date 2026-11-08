@@ -73,77 +73,63 @@ function show(payload, filePath) {
             }
         }, () => {
             imgWin.setAlwaysOnTop(true, 'screen');
-            imgWin.webContents.openDevTools();
-            ipcRenderer.sendTo(imgWin.webContents.id, 'init');
-            for (var i = 1; i <= 5; i++) {
-                setTimeout(() => ipcRenderer.sendTo(imgWin.webContents.id, 'init'), i * 200);
-            }
+            // uTools 8.0 (Electron 34) 兼容：
+            // ipcRenderer.sendTo 已废弃，子窗口 -> 主界面改用 utools.sendToParent，
+            // 主界面 -> 子窗口改用 imgWin.webContents.send
             ipcRenderer.on('resize', (event, changed, proportion) => {
-                if (event.senderId == imgWin.webContents.id) {
-                    let nowBounds = imgWin.getBounds()
-                    let widthChanged = nowBounds.width + changed
-                    imgWin.setSize(Math.ceil(widthChanged), Math.ceil(widthChanged * proportion));
-                }
+                let nowBounds = imgWin.getBounds()
+                let widthChanged = nowBounds.width + changed
+                imgWin.setSize(Math.ceil(widthChanged), Math.ceil(widthChanged * proportion));
             });
             ipcRenderer.on('moveBounds', (event, x, y, width, height) => {
-                if (event.senderId == imgWin.webContents.id) {
-                    let bound = imgWin.getBounds();
-                    let newBounds = {
-                        x: parseInt(bound.x + x),
-                        y: parseInt(bound.y + y),
-                        width: parseInt(width || bound.width),
-                        height: parseInt(height || bound.height)
-                    }
-                    imgWin.setBounds(newBounds);
+                let bound = imgWin.getBounds();
+                let newBounds = {
+                    x: parseInt(bound.x + x),
+                    y: parseInt(bound.y + y),
+                    width: parseInt(width || bound.width),
+                    height: parseInt(height || bound.height)
                 }
+                imgWin.setBounds(newBounds);
             });
             ipcRenderer.on('toEdit', (event) => {
-                if (event.senderId == imgWin.webContents.id) {
-                    let bound = imgWin.getBounds();
-                    imgWin.capturePage().then(img => {
-                        utools.redirect("截图工具", {
-                            'type': 'img',
-                            'data': `data:image/png;base64,${_arrayBufferToBase64(img)}#x=${bound.x}&y=${bound.y}`
-                        })
-                        imgWin.close();
+                let bound = imgWin.getBounds();
+                imgWin.capturePage().then(img => {
+                    utools.redirect("截图工具", {
+                        'type': 'img',
+                        'data': `data:image/png;base64,${_arrayBufferToBase64(img)}#x=${bound.x}&y=${bound.y}`
                     })
-                }
+                    imgWin.close();
+                })
             });
             ipcRenderer.on('copyNowImage', (event) => {
-                if (event.senderId == imgWin.webContents.id) {
-                    imgWin.capturePage().then(img => {
-                        utools.copyImage(`data:image/png;base64,${_arrayBufferToBase64(img)}`)
-                        utools.showNotification('图片已经拷贝至剪切板')
-                        ipcRenderer.sendTo(imgWin.webContents.id, 'reduction');
-                    })
-                }
+                imgWin.capturePage().then(img => {
+                    utools.copyImage(`data:image/png;base64,${_arrayBufferToBase64(img)}`)
+                    utools.showNotification('图片已经拷贝至剪切板')
+                    imgWin.webContents.send('reduction');
+                })
             });
             ipcRenderer.on('saveNowImage', (event) => {
-                if (event.senderId == imgWin.webContents.id) {
-                    imgWin.capturePage().then(img => {
-                        let defaultPath = utools.getPath('downloads') + "/suspend_" + new Date().getTime() + ".png"
-                        let savePath = utools.showSaveDialog({
-                            title: '保存图片',
-                            defaultPath: defaultPath,
-                            buttonLabel: '保存'
-                        })
-                        if (savePath) {
-                            fs.writeFileSync(savePath, img);
-                            utools.showNotification("保存成功")
-                        }
-                        ipcRenderer.sendTo(imgWin.webContents.id, 'reduction');
+                imgWin.capturePage().then(img => {
+                    let defaultPath = utools.getPath('downloads') + "/suspend_" + new Date().getTime() + ".png"
+                    let savePath = utools.showSaveDialog({
+                        title: '保存图片',
+                        defaultPath: defaultPath,
+                        buttonLabel: '保存'
                     })
-                }
+                    if (savePath) {
+                        fs.writeFileSync(savePath, img);
+                        utools.showNotification("保存成功")
+                    }
+                    imgWin.webContents.send('reduction');
+                })
             });
             ipcRenderer.on('modifyOpacity',(event,op) => {
-                if (event.senderId == imgWin.webContents.id) {
-                    let opacity = imgWin.getOpacity();
-                    imgWin.setOpacity(opacity +op);
-                }
+                let opacity = imgWin.getOpacity();
+                imgWin.setOpacity(opacity +op);
             })
             imgWin.on('will-resize', (event, newBounds) => {
                 event.preventDefault();
-                ipcRenderer.sendTo(imgWin.webContents.id, 'will-resize', newBounds);
+                imgWin.webContents.send('will-resize', newBounds);
             });
 
         });
