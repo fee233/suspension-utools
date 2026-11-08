@@ -41,24 +41,53 @@ function dbg(msg) {
     } catch (e) { /* 忽略日志失败 */ }
 }
 
-// 挂载窗口生命周期监听（closed 清理 / will-resize 转发），幂等
+// 挂载窗口生命周期监听（closed 清理 / will-resize 转发），幂等。
+// uTools 8.0 的窗口对象是代理，可能缺少 EventEmitter 方法（on 等），
+// 缺失时仅跳过监听（损失 closed 清理与 will-resize 转发），不影响窗口注册
 function attachWinListeners(token, win) {
     if (imgWins.has(token)) return;
     imgWins.set(token, win);
-    win.on('closed', () => {
-        imgWins.delete(token);
-        imgDataMap.delete(token);
-        ackedTokens.delete(token);
-        const timer = pushTimers.get(token);
-        if (timer) { clearInterval(timer); pushTimers.delete(token); }
-    });
-    win.on('will-resize', (event, newBounds) => {
-        event.preventDefault();
-        win.webContents.send('will-resize', newBounds);
-    });
+    if (typeof win.on === 'function') {
+        win.on('closed', () => {
+            imgWins.delete(token);
+            imgDataMap.delete(token);
+            ackedTokens.delete(token);
+            const timer = pushTimers.get(token);
+            if (timer) { clearInterval(timer); pushTimers.delete(token); }
+        });
+        win.on('will-resize', (event, newBounds) => {
+            event.preventDefault();
+            win.webContents.send('will-resize', newBounds);
+        });
+    } else {
+        dbg('attachWinListeners: win.on unavailable (uTools proxy), skip listeners, token=' + token);
+    }
 }
 
-// 子窗口确认收到图片数据：停止对应 token 的定时重推
+// 发送图片数据到指定 token 的悬浮窗口。
+// 优先走 imgWins 里已注册窗口的 webContents.send（实测可送达）；
+// event.sender 是 uTools 代理对象（无 id、send 不可达），仅作最后兜底
+function sendImgData(token, target) {
+    const d = imgDataMap.get(token);
+    if (!d) return false;
+    const data = Object.assign({ token }, d);
+    try {
+        const w = imgWins.get(token);
+        if (w && w.webContents && typeof w.webContents.send === 'function') {
+            w.webContents.send('img-data', data);
+            return 'imgWins';
+        }
+    } catch (e) { dbg('sendImgData via imgWins ERROR: ' + (e && e.message || e)); }
+    try {
+        if (target && typeof target.send === 'function') {
+            target.send('img-data', data);
+            return 'sender';
+        }
+    } catch (e) { dbg('sendImgData via sender ERROR: ' + (e && e.message || e)); }
+    return null;
+}
+
+// 子窗口确认收到图片数据：标记 token 已交付，停止对应定时重推
 ipcRenderer.on('img-ack', (event, token) => {
     dbg('img-ack token=' + token);
     if (token) ackedTokens.add(token);
@@ -66,24 +95,25 @@ ipcRenderer.on('img-ack', (event, token) => {
     if (timer) { clearInterval(timer); pushTimers.delete(token); }
 });
 
-// 悬浮窗口加载后主动请求图片数据（握手）：
-// 直接用 event.sender 应答，按创建顺序取第一个未确认的 token（多窗口 FIFO 对齐），
-// 不依赖 createBrowserWindow 回调是否触发，也不要求子窗口预先上报 token
+// 悬浮窗口加载后主动请求图片数据（握手）。
+// 注意：img-ready 可能在 createBrowserWindow 回调（窗口注册）之前到达，
+// 此时 imgWins 还没有该窗口 —— sendImgData 会先走 imgWins、不行再走 sender，
+// 之后由 show() 里的定时重推（窗口注册完成后必然走 imgWins 通道）兜底
 ipcRenderer.on('img-ready', (event) => {
-    dbg('img-ready from senderId=' + (event.sender ? event.sender.id : '?') +
-        ', pending=' + imgDataMap.size);
-    for (const [t, d] of imgDataMap) {
+    dbg('img-ready, pending=' + imgDataMap.size + ', registered=' + imgWins.size);
+    for (const [t] of imgDataMap) {
         if (!ackedTokens.has(t)) {
-            ackedTokens.add(t);
-            event.sender.send('img-data', Object.assign({ token: t }, d));
-            dbg('img-data delivered via img-ready, token=' + t);
-            // 若创建回调未触发，尝试通过 sender 反查窗口完成注册
+            // 若窗口尚未注册，尝试通过 sender 反查窗口补注册
             // （uTools 沙盒可能不暴露 BrowserWindow，失败则忽略）
-            try {
-                const { BrowserWindow } = require('electron');
-                const win = BrowserWindow.fromWebContents(event.sender);
-                if (win) attachWinListeners(t, win);
-            } catch (e) { /* ignore */ }
+            if (!imgWins.has(t)) {
+                try {
+                    const { BrowserWindow } = require('electron');
+                    const win = BrowserWindow.fromWebContents(event.sender);
+                    if (win) attachWinListeners(t, win);
+                } catch (e) { /* ignore */ }
+            }
+            const via = sendImgData(t, event.sender);
+            dbg('img-ready deliver token=' + t + ', via=' + via);
             break;
         }
     }
@@ -215,28 +245,24 @@ function show(payload, filePath) {
             }
         });
 
-        // 主推送通道：show() 内直接定时重推图片数据（200ms × 最多 30 次），
-        // 子窗口收到后回 img-ack 停推；不依赖创建回调与握手时序。
-        // 重复接收幂等（子窗口重新设置同一 src 无副作用）
+        // 主推送通道：创建后立即推一次，再定时重推兜底（200ms 名义间隔；
+        // 主窗口隐藏后 Chromium 会把定时器节流到 ~1s，故给足 60 次 ≈ 60s 覆盖）。
+        // 只有收到子窗口真实 img-ack 才停推，重复接收幂等
         let pushTries = 0;
-        pushTimers.set(token, setInterval(() => {
+        const pushOnce = () => {
             pushTries++;
-            if (ackedTokens.has(token) || pushTries > 30) {
+            if (ackedTokens.has(token) || pushTries > 60) {
                 clearInterval(pushTimers.get(token));
                 pushTimers.delete(token);
                 dbg('pusher stopped, token=' + token + ', tries=' + pushTries +
                     ', acked=' + ackedTokens.has(token));
                 return;
             }
-            try {
-                const d = imgDataMap.get(token);
-                if (d) {
-                    imgWin.webContents.send('img-data', Object.assign({ token }, d));
-                }
-            } catch (e) {
-                dbg('push ERROR: ' + (e && e.message || e));
-            }
-        }, 200));
+            const via = sendImgData(token, null);
+            dbg('pusher try=' + pushTries + ', token=' + token + ', via=' + via);
+        };
+        pushTimers.set(token, setInterval(pushOnce, 200));
+        pushOnce();
     }
 };
 
