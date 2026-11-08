@@ -74,13 +74,16 @@ function show(payload, filePath) {
             transparent: true,
             backgroundColor: '#00000000',
             frame: false,
-            alwaysOnTop: false,
+            // uTools 8.0 兼容：直接以置顶参数创建，回调中再用最高级别强制置顶
+            alwaysOnTop: true,
             webPreferences: {
                 preload: 'suspend.js',
                 devTools: true
             }
         }, () => {
-            imgWin.setAlwaysOnTop(true, 'screen');
+            // 'screen' 不是 Electron 合法的窗口层级（新内核会静默忽略导致置顶失效），
+            // 改用最高的 screen-saver 级别保证悬浮图始终在其他窗口之上
+            imgWin.setAlwaysOnTop(true, 'screen-saver');
             // 窗口就绪后主动推送图片数据，附带重试以防监听器尚未注册
             for (let i = 0; i <= 5; i++) {
                 setTimeout(() => {
