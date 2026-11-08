@@ -28,14 +28,64 @@ function uuidv4() {
 // 改用官方推荐的 webContents.send 直传。
 // 多窗口路由：每个悬浮窗口分配唯一 token，子窗口所有消息携带 token，
 // 主界面按 token 找到对应窗口操作（sendToParent 的消息会广播给所有已注册监听器）
-const imgWins = new Map();    // token -> BrowserWindow
-const imgDataMap = new Map(); // token -> { payload, filePath }
+const imgWins = new Map();      // token -> BrowserWindow
+const imgDataMap = new Map();   // token -> { payload, filePath }
+const ackedTokens = new Set();  // 子窗口已确认收到图片数据的 token
+const pushTimers = new Map();   // token -> 定时重推 interval id
 
-ipcRenderer.on('img-ready', (event, token) => {
-    const win = token && imgWins.get(token);
-    const data = token && imgDataMap.get(token);
-    if (win && data) {
-        win.webContents.send('img-data', Object.assign({ token }, data));
+// 主界面侧调试日志（与子窗口共用 /tmp/suspend-debug.log）
+function dbg(msg) {
+    try {
+        fs.appendFileSync('/tmp/suspend-debug.log',
+            new Date().toISOString() + ' [main] :: ' + msg + '\n');
+    } catch (e) { /* 忽略日志失败 */ }
+}
+
+// 挂载窗口生命周期监听（closed 清理 / will-resize 转发），幂等
+function attachWinListeners(token, win) {
+    if (imgWins.has(token)) return;
+    imgWins.set(token, win);
+    win.on('closed', () => {
+        imgWins.delete(token);
+        imgDataMap.delete(token);
+        ackedTokens.delete(token);
+        const timer = pushTimers.get(token);
+        if (timer) { clearInterval(timer); pushTimers.delete(token); }
+    });
+    win.on('will-resize', (event, newBounds) => {
+        event.preventDefault();
+        win.webContents.send('will-resize', newBounds);
+    });
+}
+
+// 子窗口确认收到图片数据：停止对应 token 的定时重推
+ipcRenderer.on('img-ack', (event, token) => {
+    dbg('img-ack token=' + token);
+    if (token) ackedTokens.add(token);
+    const timer = pushTimers.get(token);
+    if (timer) { clearInterval(timer); pushTimers.delete(token); }
+});
+
+// 悬浮窗口加载后主动请求图片数据（握手）：
+// 直接用 event.sender 应答，按创建顺序取第一个未确认的 token（多窗口 FIFO 对齐），
+// 不依赖 createBrowserWindow 回调是否触发，也不要求子窗口预先上报 token
+ipcRenderer.on('img-ready', (event) => {
+    dbg('img-ready from senderId=' + (event.sender ? event.sender.id : '?') +
+        ', pending=' + imgDataMap.size);
+    for (const [t, d] of imgDataMap) {
+        if (!ackedTokens.has(t)) {
+            ackedTokens.add(t);
+            event.sender.send('img-data', Object.assign({ token: t }, d));
+            dbg('img-data delivered via img-ready, token=' + t);
+            // 若创建回调未触发，尝试通过 sender 反查窗口完成注册
+            // （uTools 沙盒可能不暴露 BrowserWindow，失败则忽略）
+            try {
+                const { BrowserWindow } = require('electron');
+                const win = BrowserWindow.fromWebContents(event.sender);
+                if (win) attachWinListeners(t, win);
+            } catch (e) { /* ignore */ }
+            break;
+        }
     }
 });
 
@@ -107,6 +157,7 @@ ipcRenderer.on('modifyOpacity', (event, token, op) => {
 });
 
 function show(payload, filePath) {
+    dbg('show() called, payloadLen=' + (payload || '').length);
     let params = {}
     let paramsIndex = payload.lastIndexOf("#");
     if (paramsIndex > 0) {
@@ -153,30 +204,39 @@ function show(payload, filePath) {
                 devTools: true
             }
         }, () => {
-            // 'screen' 不是 Electron 合法的窗口层级（新内核会静默忽略导致置顶失效），
-            // 改用最高的 screen-saver 级别保证悬浮图始终在其他窗口之上
-            imgWin.setAlwaysOnTop(true, 'screen-saver');
-            imgWins.set(token, imgWin);
-            imgWin.on('closed', () => {
-                imgWins.delete(token);
-                imgDataMap.delete(token);
-            });
-            // 窗口就绪后主动推送图片数据（带 token），附带重试以防监听器尚未注册
-            for (let i = 0; i <= 5; i++) {
-                setTimeout(() => {
-                    const w = imgWins.get(token);
-                    const d = imgDataMap.get(token);
-                    if (w && d) {
-                        w.webContents.send('img-data', Object.assign({ token }, d));
-                    }
-                }, i * 200);
+            try {
+                dbg('createBrowserWindow callback fired, token=' + token);
+                // 'screen' 不是 Electron 合法的窗口层级（新内核会静默忽略导致置顶失效），
+                // 改用最高的 screen-saver 级别保证悬浮图始终在其他窗口之上
+                imgWin.setAlwaysOnTop(true, 'screen-saver');
+                attachWinListeners(token, imgWin);
+            } catch (e) {
+                dbg('createBrowserWindow callback ERROR: ' + (e && e.stack || e));
             }
-            imgWin.on('will-resize', (event, newBounds) => {
-                event.preventDefault();
-                imgWin.webContents.send('will-resize', newBounds);
-            });
-
         });
+
+        // 主推送通道：show() 内直接定时重推图片数据（200ms × 最多 30 次），
+        // 子窗口收到后回 img-ack 停推；不依赖创建回调与握手时序。
+        // 重复接收幂等（子窗口重新设置同一 src 无副作用）
+        let pushTries = 0;
+        pushTimers.set(token, setInterval(() => {
+            pushTries++;
+            if (ackedTokens.has(token) || pushTries > 30) {
+                clearInterval(pushTimers.get(token));
+                pushTimers.delete(token);
+                dbg('pusher stopped, token=' + token + ', tries=' + pushTries +
+                    ', acked=' + ackedTokens.has(token));
+                return;
+            }
+            try {
+                const d = imgDataMap.get(token);
+                if (d) {
+                    imgWin.webContents.send('img-data', Object.assign({ token }, d));
+                }
+            } catch (e) {
+                dbg('push ERROR: ' + (e && e.message || e));
+            }
+        }, 200));
     }
 };
 

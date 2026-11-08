@@ -26,15 +26,31 @@ debugLog('suspend.js preload loaded, ready to request img');
 // 主动向主界面请求图片数据（此时 token 未知，主界面兜底用最新待推送数据应答）
 utools.sendToParent('img-ready', null);
 
-ipcRenderer.on('img-data', (event, data) => {
-    let img = window.document.querySelector("img");
+function applyImgData(data, attempt) {
+    const img = window.document.querySelector("img");
+    if (!img) {
+        // preload 阶段 DOM 可能尚未解析完成，稍后重试
+        if (attempt < 20) {
+            setTimeout(() => applyImgData(data, attempt + 1), 50);
+        } else {
+            debugLog('applyImgData failed: img element not found');
+        }
+        return;
+    }
     window._token = data.token || window._token;
     window._payload = data.payload || '';
     img.onload = () => debugLog('img onload, naturalWidth=' + img.naturalWidth);
-    img.onerror = (e) => debugLog('img onerror');
+    img.onerror = () => debugLog('img onerror');
     img.src = data.payload;
     window._filePath = data.filePath;
+    debugLog('img-data applied, payloadLen=' + (data.payload || '').length);
+}
+
+ipcRenderer.on('img-data', (event, data) => {
     debugLog('img-data received, payloadLen=' + (data.payload || '').length);
+    // 确认收到，主界面据此停止定时重推（重复接收幂等）
+    try { utools.sendToParent('img-ack', data.token); } catch (e) { /* ignore */ }
+    applyImgData(data, 0);
 })
 
 window.toEdit = () => {
