@@ -17,6 +17,7 @@ function debugLog(msg) {
             `payloadLen=${(window._payload || '').length} naturalWidth=${img ? img.naturalWidth : 'N/A'} :: ${msg}\n`);
     } catch (e) { /* 忽略日志失败 */ }
 }
+window.debugLog = debugLog;
 debugLog('suspend.js preload loaded, ready to request img');
 
 // 主动向主界面请求图片数据（主界面 webContents.send 应答）

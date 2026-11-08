@@ -2,7 +2,9 @@
 <html>
 <style type="text/css">
     body {
-        -webkit-app-region: drag;
+        /* uTools 8.0 (Chromium 132) 兼容：drag 区域会吞掉滚轮/双指滚动事件，
+           改为 no-drag + JS 手动拖动窗口（见下方 mousedown/mousemove） */
+        -webkit-app-region: no-drag;
         -webkit-user-select: none;
         margin: 0px;
         width: 100%;
@@ -163,6 +165,26 @@
         }
         dowingKey[event.key] = true
     });
+    //手动拖动窗口（替代 -webkit-app-region: drag）
+    let dragging = false;
+    let dragX = 0;
+    let dragY = 0;
+    document.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        dragging = true;
+        dragX = e.screenX;
+        dragY = e.screenY;
+    });
+    document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        window.moveBounds(e.screenX - dragX, e.screenY - dragY);
+        dragX = e.screenX;
+        dragY = e.screenY;
+    });
+    document.addEventListener("mouseup", () => {
+        dragging = false;
+    });
+
     document.addEventListener("wheel", (e) => {
         // uTools 8.0 (Chromium 132 / Electron 34) 兼容：
         // 优先使用标准 e.deltaY（双指滚动、触控板捏合均触发 wheel 事件），
@@ -173,6 +195,7 @@
         } else {
             delta = Math.max(-1, Math.min(1, (e.wheelDelta || -e.detail)));
         }
+        if (window.debugLog) window.debugLog(`wheel deltaY=${e.deltaY} ctrl=${e.ctrlKey} delta=${delta}`);
         if (delta < 0 && img.width <= 100) {
             return false;
         }
