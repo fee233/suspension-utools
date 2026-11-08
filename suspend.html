@@ -168,8 +168,15 @@
         dowingKey[event.key] = true
     });
     document.addEventListener("wheel", (e) => {
-        console.log(e);
-        var delta = Math.max(-1, Math.min(1, (e.wheelDelta || -e.detail)));
+        // uTools 8.0 (Chromium 132 / Electron 34) 兼容：
+        // 优先使用标准 e.deltaY（双指滚动、触控板捏合均触发 wheel 事件），
+        // 旧内核的非标准 wheelDelta 作为兜底。
+        let delta = 0;
+        if (typeof e.deltaY === "number" && e.deltaY !== 0) {
+            delta = e.deltaY > 0 ? -1 : 1; // deltaY > 0 表示向下滚动 = 缩小
+        } else {
+            delta = Math.max(-1, Math.min(1, (e.wheelDelta || -e.detail)));
+        }
         if (delta < 0 && img.width <= 100) {
             return false;
         }
