@@ -25,14 +25,85 @@ function uuidv4() {
 }
 
 // uTools 8.0 兼容：不再通过 localStorage 向自定义窗口传图，
-// 改用官方推荐的 webContents.send 直传（悬浮窗口加载后主动回执请求，主界面立即应答）
-let imgWin = null;
-let pendingImgData = null;
+// 改用官方推荐的 webContents.send 直传。
+// 多窗口路由：每个悬浮窗口分配唯一 token，子窗口所有消息携带 token，
+// 主界面按 token 找到对应窗口操作（sendToParent 的消息会广播给所有已注册监听器）
+const imgWins = new Map();    // token -> BrowserWindow
+const imgDataMap = new Map(); // token -> { payload, filePath }
 
-ipcRenderer.on('img-ready', () => {
-    if (imgWin && pendingImgData) {
-        imgWin.webContents.send('img-data', pendingImgData);
+ipcRenderer.on('img-ready', (event, token) => {
+    const win = token && imgWins.get(token);
+    const data = token && imgDataMap.get(token);
+    if (win && data) {
+        win.webContents.send('img-data', Object.assign({ token }, data));
     }
+});
+
+ipcRenderer.on('resize', (event, token, changed, proportion) => {
+    const win = imgWins.get(token);
+    if (!win) return;
+    const nowBounds = win.getBounds();
+    const widthChanged = nowBounds.width + changed;
+    win.setSize(Math.ceil(widthChanged), Math.ceil(widthChanged * proportion));
+});
+
+ipcRenderer.on('moveBounds', (event, token, x, y, width, height) => {
+    const win = imgWins.get(token);
+    if (!win) return;
+    const bound = win.getBounds();
+    win.setBounds({
+        x: parseInt(bound.x + x),
+        y: parseInt(bound.y + y),
+        width: parseInt(width || bound.width),
+        height: parseInt(height || bound.height)
+    });
+});
+
+ipcRenderer.on('toEdit', (event, token) => {
+    const win = imgWins.get(token);
+    if (!win) return;
+    const bound = win.getBounds();
+    win.capturePage().then(img => {
+        utools.redirect("截图工具", {
+            'type': 'img',
+            'data': `data:image/png;base64,${_arrayBufferToBase64(img)}#x=${bound.x}&y=${bound.y}`
+        })
+        win.close();
+    })
+});
+
+ipcRenderer.on('copyNowImage', (event, token) => {
+    const win = imgWins.get(token);
+    if (!win) return;
+    win.capturePage().then(img => {
+        utools.copyImage(`data:image/png;base64,${_arrayBufferToBase64(img)}`)
+        utools.showNotification('图片已经拷贝至剪切板')
+        win.webContents.send('reduction');
+    })
+});
+
+ipcRenderer.on('saveNowImage', (event, token) => {
+    const win = imgWins.get(token);
+    if (!win) return;
+    win.capturePage().then(img => {
+        const defaultPath = utools.getPath('downloads') + "/suspend_" + new Date().getTime() + ".png"
+        const savePath = utools.showSaveDialog({
+            title: '保存图片',
+            defaultPath: defaultPath,
+            buttonLabel: '保存'
+        })
+        if (savePath) {
+            fs.writeFileSync(savePath, img);
+            utools.showNotification("保存成功")
+        }
+        win.webContents.send('reduction');
+    })
+});
+
+ipcRenderer.on('modifyOpacity', (event, token, op) => {
+    const win = imgWins.get(token);
+    if (!win) return;
+    win.setOpacity(win.getOpacity() + op);
 });
 
 function show(payload, filePath) {
@@ -57,8 +128,9 @@ function show(payload, filePath) {
             height = Math.min(height, display.size.height * 0.8);
             width = height * scale;
         }
-        pendingImgData = { payload, filePath };
-        imgWin = utools.createBrowserWindow('suspend.html', {
+        const token = uuidv4();
+        imgDataMap.set(token, { payload, filePath });
+        const imgWin = utools.createBrowserWindow('suspend.html', {
             title: 'img',
             x: params.x ? parseInt(params.x) : null,
             y: params.y ? parseInt(params.y) : null,
@@ -84,68 +156,21 @@ function show(payload, filePath) {
             // 'screen' 不是 Electron 合法的窗口层级（新内核会静默忽略导致置顶失效），
             // 改用最高的 screen-saver 级别保证悬浮图始终在其他窗口之上
             imgWin.setAlwaysOnTop(true, 'screen-saver');
-            // 窗口就绪后主动推送图片数据，附带重试以防监听器尚未注册
+            imgWins.set(token, imgWin);
+            imgWin.on('closed', () => {
+                imgWins.delete(token);
+                imgDataMap.delete(token);
+            });
+            // 窗口就绪后主动推送图片数据（带 token），附带重试以防监听器尚未注册
             for (let i = 0; i <= 5; i++) {
                 setTimeout(() => {
-                    if (imgWin && pendingImgData) {
-                        imgWin.webContents.send('img-data', pendingImgData);
+                    const w = imgWins.get(token);
+                    const d = imgDataMap.get(token);
+                    if (w && d) {
+                        w.webContents.send('img-data', Object.assign({ token }, d));
                     }
                 }, i * 200);
             }
-            // uTools 8.0 (Electron 34) 兼容：
-            // ipcRenderer.sendTo 已废弃，子窗口 -> 主界面改用 utools.sendToParent，
-            // 主界面 -> 子窗口改用 imgWin.webContents.send
-            ipcRenderer.on('resize', (event, changed, proportion) => {
-                let nowBounds = imgWin.getBounds()
-                let widthChanged = nowBounds.width + changed
-                imgWin.setSize(Math.ceil(widthChanged), Math.ceil(widthChanged * proportion));
-            });
-            ipcRenderer.on('moveBounds', (event, x, y, width, height) => {
-                let bound = imgWin.getBounds();
-                let newBounds = {
-                    x: parseInt(bound.x + x),
-                    y: parseInt(bound.y + y),
-                    width: parseInt(width || bound.width),
-                    height: parseInt(height || bound.height)
-                }
-                imgWin.setBounds(newBounds);
-            });
-            ipcRenderer.on('toEdit', (event) => {
-                let bound = imgWin.getBounds();
-                imgWin.capturePage().then(img => {
-                    utools.redirect("截图工具", {
-                        'type': 'img',
-                        'data': `data:image/png;base64,${_arrayBufferToBase64(img)}#x=${bound.x}&y=${bound.y}`
-                    })
-                    imgWin.close();
-                })
-            });
-            ipcRenderer.on('copyNowImage', (event) => {
-                imgWin.capturePage().then(img => {
-                    utools.copyImage(`data:image/png;base64,${_arrayBufferToBase64(img)}`)
-                    utools.showNotification('图片已经拷贝至剪切板')
-                    imgWin.webContents.send('reduction');
-                })
-            });
-            ipcRenderer.on('saveNowImage', (event) => {
-                imgWin.capturePage().then(img => {
-                    let defaultPath = utools.getPath('downloads') + "/suspend_" + new Date().getTime() + ".png"
-                    let savePath = utools.showSaveDialog({
-                        title: '保存图片',
-                        defaultPath: defaultPath,
-                        buttonLabel: '保存'
-                    })
-                    if (savePath) {
-                        fs.writeFileSync(savePath, img);
-                        utools.showNotification("保存成功")
-                    }
-                    imgWin.webContents.send('reduction');
-                })
-            });
-            ipcRenderer.on('modifyOpacity',(event,op) => {
-                let opacity = imgWin.getOpacity();
-                imgWin.setOpacity(opacity +op);
-            })
             imgWin.on('will-resize', (event, newBounds) => {
                 event.preventDefault();
                 imgWin.webContents.send('will-resize', newBounds);

@@ -3,28 +3,32 @@ const { ipcRenderer } = require('electron')
 
 // uTools 8.0 (Electron 34) 兼容：
 // ipcRenderer.sendTo 已废弃移除。
-// 子窗口 -> 插件主界面：utools.sendToParent(channel, ...args)
+// 子窗口 -> 插件主界面：utools.sendToParent(channel, token, ...args)
 // 插件主界面 -> 子窗口：webContents.send()，本文件中用 ipcRenderer.on 接收
+// 多窗口路由：每个窗口持有唯一 token，所有发往主界面的消息首参携带 token，
+// 主界面按 token 找到对应窗口操作，避免多窗口消息串扰
 
 window.isMac = utools.isMacOs();
+window._token = null;
 
 // 调试日志：便于排查显示问题，可随时删除
 function debugLog(msg) {
     try {
         let img = window.document.querySelector("img");
         fs.appendFileSync('/tmp/suspend-debug.log',
-            `${new Date().toISOString()} href=${window.location.href} ` +
+            `${new Date().toISOString()} token=${window._token} href=${window.location.href} ` +
             `payloadLen=${(window._payload || '').length} naturalWidth=${img ? img.naturalWidth : 'N/A'} :: ${msg}\n`);
     } catch (e) { /* 忽略日志失败 */ }
 }
 window.debugLog = debugLog;
 debugLog('suspend.js preload loaded, ready to request img');
 
-// 主动向主界面请求图片数据（主界面 webContents.send 应答）
-utools.sendToParent('img-ready');
+// 主动向主界面请求图片数据（此时 token 未知，主界面兜底用最新待推送数据应答）
+utools.sendToParent('img-ready', null);
 
 ipcRenderer.on('img-data', (event, data) => {
     let img = window.document.querySelector("img");
+    window._token = data.token || window._token;
     window._payload = data.payload || '';
     img.onload = () => debugLog('img onload, naturalWidth=' + img.naturalWidth);
     img.onerror = (e) => debugLog('img onerror');
@@ -34,27 +38,27 @@ ipcRenderer.on('img-data', (event, data) => {
 })
 
 window.toEdit = () => {
-    utools.sendToParent('toEdit');
+    utools.sendToParent('toEdit', window._token);
 }
 window.resize = (changed, proportion) => {
-    utools.sendToParent('resize', changed, proportion);
+    utools.sendToParent('resize', window._token, changed, proportion);
 }
 window.moveBounds = (x, y, width, height) => {
-    utools.sendToParent('moveBounds', x, y, width, height);
+    utools.sendToParent('moveBounds', window._token, x, y, width, height);
 }
 
 /**
  * 拷贝当前图片，借助窗口截图实现
  */
 window.copyNowImage = () => {
-    utools.sendToParent('copyNowImage');
+    utools.sendToParent('copyNowImage', window._token);
 }
 
 /*
  * 保存当前图片，借助窗口截图实现
  */
 window.saveNowImage = () => {
-    utools.sendToParent('saveNowImage');
+    utools.sendToParent('saveNowImage', window._token);
 }
 
 ipcRenderer.on('reduction', (event) => {
@@ -62,7 +66,7 @@ ipcRenderer.on('reduction', (event) => {
 })
 
 window.modifyOpacity = (op) => {
-    utools.sendToParent('modifyOpacity', op);
+    utools.sendToParent('modifyOpacity', window._token, op);
 }
 
 
